@@ -1,0 +1,266 @@
+---
+title: "Predict Analysis - Human Activity Recognition"
+author: "Igor Alcantara"
+date: "February 23, 2016"
+output: html_document
+---
+
+#Author
+This prediction and document were created by Igor Alcantara. You can contact him at <igor@igoralcantara.com.br>.
+
+#Background
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks.  
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.  
+
+More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har>.
+
+#Data
+The training data for this project are available here:
+
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+
+The test data are available here:
+
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+
+The data for this project come from this source: <http://groupware.les.inf.puc-rio.br/har>. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+#Importing the libraries needed for this assignment
+
+This assignment uses the Caret package in R for most of the tasks preparing the data, testing the models and making predictions. RPart and Rattle are used to create the model using Decison Tree algorithm and plot it.
+```{r}
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(rattle) 
+```
+
+Let's also import some libraries to plot the train data before any model is built.
+```{r}
+library(ggplot2)
+library(ggthemes)
+library(grid)
+library(gridExtra)
+```
+
+#Loading and understading the data
+
+First task is to load the two datasets available: Train and Test.
+```{r}
+trainData <- read.csv("pml-training.csv")
+testData <- read.csv("pml-testing.csv")
+```
+
+Let's see how many rows and columns there are in the Train dataset.
+```{r}
+dim(trainData)
+```
+
+With the objective to see how somme of the variables are distributed, I will build 4 density plots focusing on the variables Gyro Belt, Pitch Belt, Magnet Belt and Dumbell Movement. They are related to the different movement and activity metrics measure in 3 axis. Each axis is represented by o a different color. Gyro Belt and Magnet Belts are reported in x, y and z axis. Pitch Belt and Dumbell are reported in types of movement: yaw, pitch and roll.
+
+- X axis or Yaw = Red color
+- Y axis or Pitch = Green color
+- Z axis or Roll = Blue color
+
+```{r}
+plot_A <- ggplot() + geom_density(aes(x=gyros_belt_x), colour="red", data=trainData) +
+                     geom_density(aes(x=gyros_belt_y), colour="green", data=trainData) +
+                     geom_density(aes(x=gyros_belt_z), colour="blue", data=trainData) +
+          theme_few() + xlab("Gyro Belt (xyz)")
+
+plot_B <- ggplot() + geom_density(aes(x=roll_belt), colour="red", data=trainData) +
+                     geom_density(aes(x=pitch_belt), colour="green", data=trainData) +
+                     geom_density(aes(x=yaw_belt), colour="blue", data=trainData) +
+          theme_few() + xlab("Pitch Belt (yaw, pitch, roll)")
+
+plot_C <- ggplot() + geom_density(aes(x=magnet_belt_x), colour="red", data=trainData) +
+                     geom_density(aes(x=magnet_belt_y), colour="green", data=trainData) +
+                     geom_density(aes(x=magnet_belt_z), colour="blue", data=trainData) +
+          theme_few() + xlab("Magnet Belt (xyz)")
+
+plot_D <- ggplot() + geom_density(aes(x=roll_dumbbell), colour="red", data=trainData) +
+                     geom_density(aes(x=pitch_dumbbell), colour="green", data=trainData) +
+                     geom_density(aes(x=yaw_dumbbell), colour="blue", data=trainData) +
+          theme_few() + xlab("Dumbell Movement (yaw, pitch, roll)")
+
+gridPlots <- arrangeGrob(plot_A, plot_B, plot_C, plot_D, nrow = 2, ncol = 2)
+grid.draw(gridPlots)
+
+```
+
+#Getting the Data Ready
+In order to calculate the "Out of Sample Error", I will split the training dataset into two subsets: training and validation. Training Dataset contains 70% of the original training dataset. The Seed is being set for reproducibility reasons.
+
+```{r}
+set.seed(5777) #it turns out that the Seed is my birthdate (May-07-1977) :)
+isInTrain <- createDataPartition(y=trainData$classe, p=0.7, list=F)
+trainData1 <- trainData[isInTrain, ]
+trainData2 <- trainData[-isInTrain, ]
+```
+
+
+
+A large number of predictors are usually a problem when making predictions. For that reason, the next task in preparing the data is to eliminate predictors with nearly zero variance. Those include variables where most of the values are NA and variables with small variability.
+
+Notice that I decide which ones to remove by analyzing trainData1, and perform the identical removals on trainData2:
+
+```{r}
+# Step 01 - remove predictors with nearly zero variance
+nzv <- nearZeroVar(trainData1)
+trainData1 <- trainData1[, -nzv]
+trainData2 <- trainData2[, -nzv]
+
+# Step 02 - remove predictors that are almost all NA
+majorityNAs <- sapply(trainData1, function(x) mean(is.na(x))) > 0.95
+trainData1 <- trainData1[, majorityNAs==F]
+trainData2 <- trainData2[, majorityNAs==F]
+
+# Step 03 - remove variables that don't make intuitive sense for prediction (X, user_name, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp), which happen to be the first five variables
+trainData1 <- trainData1[, -(1:5)]
+trainData2 <- trainData2[, -(1:5)]
+```
+
+Remember we have originaly 160 variables in the dataset. Let's see now after this cleanup how many we have. Notice many variables were removed and now we have a much smaller and meaninful set of predictors.
+```{r}
+dim(trainData1)
+```
+
+#Create the Prediction Models
+
+I will now create 4 prediction models and then select the one that gives the most accurate prediction. For each one of the models I will create a 4-fold cross validation to select the best tuning parameters.
+
+## Model 01 - Linear Discriminant Analysis
+```{r}
+# instruct train to use 2-fold CV to select optimal tuning parameters
+fitControl <- trainControl(method="cv", number=4, verboseIter=FALSE)
+
+# fit model on trainData1
+fit1 <- train(classe ~ ., data=trainData1, method="lda", trControl=fitControl, verbose=FALSE)
+
+fit1$finalModel
+```
+
+## Model 02 - Decision Tree
+
+For this model we will see the results using the Fancy Plot.
+```{r}
+fit2 <- rpart(classe ~ ., data=trainData1, method="class")
+fancyRpartPlot(fit2)
+```
+
+## Model 03 - Random Forest
+
+```{r}
+# fit model on trainData1
+fit3 <- train(classe ~ ., data=trainData1, method="rf", trControl=fitControl, verbose=FALSE)
+
+fit3$finalModel
+```
+
+
+## Model 04 - Gradient Boosted Model
+
+```{r}
+# fit model on trainData1
+fit4 <- train(classe ~ ., data=trainData1, method="gbm", trControl=fitControl, verbose=FALSE)
+
+fit4$finalModel
+```
+
+# Chosing the best model
+
+Now it is time to predict using each model and check for the accuracy of each prediction in a Confusion Matrix in order to select the best model. Since trainData1 was used to train the data, we will use trainData2 to predict. By doing that we want to calculate the Out of Sample Error and to avoid overfitting the model.
+
+```{r}
+predict1 <- predict(fit1, newdata=trainData2)
+confusionMatrix(trainData2$classe, predict1)
+
+predict2 <- predict(fit2, newdata=trainData2, type="class")
+confusionMatrix(trainData2$classe, predict2)
+
+predict3 <- predict(fit3, newdata=trainData2)
+confusionMatrix(trainData2$classe, predict3)
+
+predict4 <- predict(fit4, newdata=trainData2)
+confusionMatrix(trainData2$classe, predict4)
+```
+
+These are the results for Accuracy and Out of Sample Errors for each one of the models:
+
+- Linear Discriminant Analysis
+-- Accuracy: 71%
+-- Out of Sample Error: 29%
+
+- Decision Tree
+-- Accuracy: 72%
+-- Out of Sample Error: 28%
+
+- Random Forest
+-- Accuracy: 99%
+-- Out of Sample Error: 1%
+
+- Generalized Boosted Model
+-- Accuracy: 98%
+-- Out of Sample Error: 2%
+
+The results show that, as expected, Random Forest is by far the best model and, because of that it will be selected.
+
+#Submit the selected method to another round of training
+
+Now that the model is selected, we will retrain it using the complete training dataset. For that, we will use the same code it was used to prepare the data and train the models.
+
+```{r}
+# Step 01 - remove predictors with nearly zero variance
+nzv <- nearZeroVar(trainData)
+trainData <- trainData[, -nzv]
+testData <- testData[, -nzv]
+
+# Step 02 - remove predictors that are almost all NA
+majorityNAs <- sapply(trainData, function(x) mean(is.na(x))) > 0.95
+trainData <- trainData[, majorityNAs==FALSE]
+testData <- testData[, majorityNAs==FALSE]
+
+# Step 03 - remove variables that don't make intuitive sense for prediction (X, user_name, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp), which happen to be the first five variables
+trainData <- trainData[, -(1:5)]
+testData <- testData[, -(1:5)]
+
+# Step 04 - re-build model using full training set (trainData)
+fitControl <- trainControl(method="cv", number=5, verboseIter=FALSE, allowParallel = TRUE)
+fitModel <- train(classe ~ ., data=trainData, method="rf", trControl=fitControl)
+```
+
+#Saving predictions in a file for assignment submission
+
+At a last step, the predictions will be saved in a file to be submitted in the quiz data. 
+
+```{r}
+# predict on test set
+predictions <- predict(fitModel, newdata=testData)
+
+# convert predictions to character vector
+predictions <- as.character(predictions)
+
+#Loop the predictions and store the values in a text object
+nPred <- length(predictions)
+predictionTextFile <- ''
+for(i in 1:nPred) {
+  predictionTextFile <- paste0(predictionTextFile, "Problem ", i, ": ", predictions[i], "\n")
+}
+
+write.table(predictionTextFile, file="predictions.txt", quote=FALSE, row.names=FALSE, col.names=FALSE)
+```
+
+
+#References
+- [Human Activity Recognition] (http://groupware.les.inf.puc-rio.br/har)
+
+- [Linear Discriminant Analysis] (https://en.wikipedia.org/wiki/Linear_discriminant_analysis)
+
+- [Decision Tree](https://en.wikipedia.org/wiki/Decision_tree)
+
+- [Random Forest](https://en.wikipedia.org/wiki/Random_forest)
+
+- [Gradient Boosted Model](http://www.ncbi.nlm.nih.gov/pmc/articles/PMC3885826/)
+
+- [Author's Web Site](http://igoralcantara.com.br)
